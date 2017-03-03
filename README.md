@@ -1,0 +1,2 @@
+# OptFoatSalesWithSparkAndScala
+利用spark和scala优化Fota的销量统计
