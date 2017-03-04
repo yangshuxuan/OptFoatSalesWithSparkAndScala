@@ -1,10 +1,7 @@
-name := "Simple Project"
+name := "CtFota"
 
-version := "0.2.3"
+version := "0.9.6"
 
-organization := "org.apache"
-
-val mahoutVersion = "0.11.1"
-
+organization := "adups"
 
 libraryDependencies += "com.databricks" %% "spark-avro" % "2.0.1"
