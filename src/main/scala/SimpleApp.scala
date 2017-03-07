@@ -2,7 +2,7 @@ package wuxi99
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.SparkConf
-import DeviceInfoDataFrame.{computeFotaSalesCount}
+import DeviceInfoDataFrame.{computeFotaSalesCount,compareWithWXJ}
 object CtFotaSalesApp {
   def main(args: Array[String]) {
     if (args.length != 1) {
@@ -24,6 +24,7 @@ object CtFotaSalesApp {
     implicit val sqlHiveContext = new org.apache.spark.sql.hive.HiveContext(sc)
     val Array(pt) = args
     computeFotaSalesCount(pt)
+    compareWithWXJ(pt)
     sc.stop()
   }
 }
