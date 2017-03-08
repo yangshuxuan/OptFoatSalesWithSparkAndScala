@@ -8,8 +8,8 @@ import org.apache.spark.SparkContext
 //import scala.collection.JavaConversions._
 import org.apache.spark.sql.hive.HiveContext
 //import org.apache.spark.rdd.RDD
-//import org.joda.time.{DateTime, Interval,LocalDate,LocalTime}
-//import org.joda.time.format.DateTimeFormat
+import org.joda.time.{DateTime, Interval,LocalDate,LocalTime}
+import org.joda.time.format.DateTimeFormat
 import org.apache.spark.sql.functions._
 import java.io.FileNotFoundException
 import MailUtility.{sendMail}
@@ -152,7 +152,7 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
     withColumn("up_time",$"up_time".cast("string"))
   }
   def saveCommon(pt:String = "2017-02-07",destTableName:String)(implicit sqlHiveContext: HiveContext)  {
-    val path = s"tmp/${destTableName}/pt=${pt}"
+    val path = s"YangShuxuanNotDelete/tmp/${destTableName}/pt=${pt}"
     deleteHdfsTempFile(path)
     deviceInfo.write.avro(path)                                           //存储清理结果到hdfs
     val loadCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.${destTableName} PARTITION (pt='${pt}')"
@@ -272,7 +272,7 @@ object DeviceInfoDataFrame {
                   "country_type",
                   "data_version")
   private def readDataFile(pt:String,x:String)(implicit sqlHiveContext: HiveContext) = try {
-    Some(sqlHiveContext.read.avro(s"${pt}/${x}"))
+    Some(sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/${x}"))
   } catch {
     case ex: FileNotFoundException =>  None
   }
@@ -297,14 +297,14 @@ object DeviceInfoDataFrame {
   }
   /****加载地区信息***************/
   def loadRegionInfo(regionTableName:String,pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext) = {
-    sqlHiveContext.read.avro(s"${pt}/${regionTableName}").
+    sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/${regionTableName}").
         withColumnRenamed("ctiy_en","city_en").
         drop("COL3").drop("COL4").drop("COL5").drop("COl2").drop("id").drop("push_time").dropDuplicates(Array("imei","ip","mid"))
   }
   /****加载fota4第三方设备***************/
   def loadOpenDeviceInfo(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext) = {
     import sqlHiveContext.implicits._
-    sqlHiveContext.read.avro(s"${pt}/v4deviceopen").
+    sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/v4deviceopen").
         drop("id").
         drop("COl2").
         drop("COL3").
@@ -390,18 +390,21 @@ object DeviceInfoDataFrame {
 
       //val testFields = afterClean.correctForMdstallpro1stimeipt
       afterClean.saveCommon(pt,"ysx_md_st_all_dt")                                     //存储清理后的销量到hive表里面
+      logger.info(s"数据清理完成-----finish clean:{pt}")
 
       /********去重imei**********************************/
       
       val toDaySalesByImei = (afterClean distinctByImei pt).cache
       toDaySalesByImei.select($"oem",$"product",$"region",$"operator",$"imei",$"imei2").saveCommon(pt,"tmp_history_imei")
       toDaySalesByImei.correctForMdstallpro1stimeipt().saveCommon(pt,"ysx_md_st_all_pro1st_imei_pt")
+      logger.info(s"去重imei完成-----finish imei:{pt}")
 
 
       /********去重mid***********************************/
 
       val toDaySalesByMid = (afterClean distinctByMid pt).cache
       toDaySalesByMid.select("oem","product","region","operator","mid").saveCommon(pt,"tmp_history_mid")
+      logger.info(s"去重mid完成-----finish mid:{pt}")
 
       /********旧的计算方式，尤其是表合并非常复杂*************/
 
@@ -421,6 +424,7 @@ object DeviceInfoDataFrame {
       sumImeiAndMid("imei_sum","mid_sum").
       correctFieldNameOfResultDataSet().
       saveCommon(pt,"ysx_md_st_all_pro1st_day_pt")
+      logger.info(s"初步计算完成-----finish compute:${pt}")
   }
   def compareWithWXJ(pt:String)(implicit sqlHiveContext: HiveContext){
       def computeTotalImei(tableName:String)={
@@ -441,6 +445,36 @@ object DeviceInfoDataFrame {
       assert(diff <= 800)
 
 
+  }
+  def run(pt:String)(implicit sqlHiveContext: HiveContext){
+  //读取配置文件确定开始日期，一直运行到指定日期
+    val confFileName = "optCtFotaState.xml"
+
+    val formatStr = "yyyy-MM-dd"
+
+    val format = DateTimeFormat.forPattern(formatStr)
+
+    val finishedDate = DateTime.parse(xml.XML.loadFile(confFileName).text, format)
+
+    val toDate = DateTime.parse(pt,format)
+
+    var beginDate = finishedDate
+
+    while(beginDate.isBefore(toDate)){
+
+      beginDate = beginDate.plusDays(1) //beginDate其实代表了已经完成的最后一天，这里写的有点晦涩
+
+      val curPt = beginDate.toString(formatStr)
+
+      computeFotaSalesCount(curPt)
+
+      compareWithWXJ(curPt)           //由于这里有断言有可能失败导致后续无法进行，因此在这里失败以后需要人工干预以决定是否需要修改日期
+
+      val curNode = <finishedDay>{curPt}</finishedDay> 
+      
+      scala.xml.XML.save(confFileName,curNode) 
+    }
+    
   }
 
 }
