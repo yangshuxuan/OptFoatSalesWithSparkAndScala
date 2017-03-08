@@ -8,10 +8,12 @@ import org.apache.spark.SparkContext
 //import scala.collection.JavaConversions._
 import org.apache.spark.sql.hive.HiveContext
 //import org.apache.spark.rdd.RDD
-//import org.joda.time.{DateTime, Interval,LocalDate,LocalTime}
-//import org.joda.time.format.DateTimeFormat
+import org.joda.time.{DateTime, Interval,LocalDate,LocalTime}
+import org.joda.time.format.DateTimeFormat
 import org.apache.spark.sql.functions._
 import java.io.FileNotFoundException
+import MailUtility.{sendMail}
+import grizzled.slf4j.Logger
 
 class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
   import DeviceInfoDataFrame.deleteHdfsTempFile
@@ -74,15 +76,6 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
   def addSim2CarrierColumn(operatorDF:DataFrame) ={
     deviceInfo.join(operatorDF,deviceInfo("secondOperator") === operatorDF("mcc_mac"),"left_outer").drop("mcc_mac").withColumnRenamed("operator_en","sim2_carrier")
   }
-  /****存储清理后的fota销量数据到hive**********/
-  def saveCleanedFotaSales(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  {
-    val path = s"tmp/ysx_md_st_all_dt/pt=${pt}"
-    deleteHdfsTempFile(path)
-    deviceInfo.write.avro(path)                                           //存储清理结果到hdfs
-    val loadCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.ysx_md_st_all_dt PARTITION (pt='${pt}')"
-    sqlHiveContext.sql(loadCMD)
-    
-  }
   def distinctByImei(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  = {
     import sqlHiveContext.implicits._
     //重新排列imei和imei2,小的在前面大的在后面，便于去重
@@ -105,17 +98,6 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
     
   }
 
-  def saveDistinctImei(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  {
-    import sqlHiveContext.implicits._
-    val path = s"tmp/tmp_history_imei/pt=${pt}"
-    deleteHdfsTempFile(path)
-    deviceInfo.select($"oem",$"product",$"region",$"operator",$"imei",$"imei2").
-    write.avro(path)        //存储去重imei到临时文件中
-
-    val hiveCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.tmp_history_imei PARTITION (pt='${pt}')"    //加载结果到Hive中，便于以后使用
-
-    sqlHiveContext.sql(hiveCMD)
-  }
   def distinctByMid(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  = {
     val historyMid = sqlHiveContext.sql(s"FROM ct_fota.tmp_history_mid SELECT * where pt < '${pt}'").drop("pt").cache //读取历史mid
 
@@ -125,17 +107,59 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
 
     midHistoryDedup.dropDuplicates(Seq("oem","product","region","operator","mid"))
   }
-  def saveDistinctMid(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  {
-    val path = s"tmp/tmp_history_mid/pt=${pt}"
+  def correctForMdstallpro1stimeipt()(implicit sqlHiveContext: HiveContext)  ={
+    import sqlHiveContext.implicits._
+  //在将imei去重后的数据存放到表ysx_md_st_all_pro1st_imei_pt之前，还必须进行重命名，真是无处不在的坑
+    val fillZero =  udf(() => "0")
+    val lastNames =  List("project_code","md5_code","seq_row","import_time","col5","last_ip","last_mac","last_sn",  "last_sim",  "last_time", 
+                    "last_resolution",  "last_brands",  "last_release",  "last_language",
+                    "last_app_version",  "last_sdk_version",  "last_imsi",  "last_operator_name",
+                    "last_main_gid",  "last_second_gid",  "last_second_operator",  "last_imei2",  
+                    "last_sim2_mac",  "last_sim2_carrier",  "last_esn",  "last_current_spn",  "last_minor_spn",
+                    "last_minor_imsi",  "last_continent_en",  "last_continent_zh",  "last_country_en",
+                    "last_country_zh",  "last_province_en",  "last_province_zh",  "last_ctiy_en",  "last_city_zh",  "last_country_type")
     
-    deleteHdfsTempFile(path)
-
-    deviceInfo.select("oem","product","region","operator","mid").write.avro(path)
-
-    val hiveCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.tmp_history_mid PARTITION (pt='${pt}')"    //加载结果到Hive中，便于以后使用
-
-    sqlHiveContext.sql(hiveCMD)
+    lastNames.foldLeft(deviceInfo)((u,v) => u.withColumn(v, fillZero())).
+    drop("mid").
+    withColumnRenamed("apntype","apn_type").
+    withColumnRenamed("appversion", "app_version").
+    withColumnRenamed("city_en", "ctiy_en").
+    withColumnRenamed("citycode","city_code").
+    withColumnRenamed("devicesinfoext","devicesinfo_ext").
+    withColumnRenamed("devicetype","device_type").
+    withColumnRenamed("maingid","main_gid").
+    withColumnRenamed("networktype","network_type").
+    withColumnRenamed("platform","phone_platform").
+    withColumn("sim2_mac",$"secondoperator").
+    withColumnRenamed("secondoperator","second_operator").
+    withColumnRenamed("gcmid","col4").
+    withColumnRenamed("co7","col6").
+    withColumnRenamed("co8","col7").
+    withColumnRenamed("co9","col8").
+    withColumnRenamed("provincecode","province_code").
+    withColumnRenamed("rebootappversion","reboot_app_version").
+    withColumnRenamed("rebootsign","reboot_sign").
+    withColumnRenamed("sdkversion","sdk_version").
+    withColumnRenamed("selfsign","self_sign").
+    withColumnRenamed("sim1_spn","current_spn").
+    withColumnRenamed("sim2_spn","minor_spn").
+    withColumnRenamed("sim2_imsi","minor_imsi").
+    withColumnRenamed("sim1_carrier","operator_name").
+    withColumnRenamed("secondgid","second_gid").
+    withColumn("last_checktime",from_unixtime($"last_checktime")).
+    withColumn("is_push",when($"is_push" === 0,"FALSE").otherwise("TRUE")).
+    withColumn("istest_device",when($"istest_device" === 0,"FALSE").otherwise("TRUE")).
+    withColumn("up_time",$"up_time".cast("string"))
   }
+  def saveCommon(pt:String = "2017-02-07",destTableName:String)(implicit sqlHiveContext: HiveContext)  {
+    val path = s"YangShuxuanNotDelete/tmp/${destTableName}/pt=${pt}"
+    deleteHdfsTempFile(path)
+    deviceInfo.write.avro(path)                                           //存储清理结果到hdfs
+    val loadCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.${destTableName} PARTITION (pt='${pt}')"
+    sqlHiveContext.sql(loadCMD)
+    
+  }
+  
   def correctColumnName()={
     //用于对fota3,fota4,fota5列名进行清理和校验，
     deviceInfo.drop("id").
@@ -183,18 +207,6 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
                 sum(deviceInfo(midFieldName)) as midFieldName
     )
   }
-  def saveToysx_md_st_all_pro1st_day_pt(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext)  {
-
-    val path = s"tmp/ysx_md_st_all_pro1st_day_pt/pt=${pt}"
-
-    deleteHdfsTempFile(path)
-
-    deviceInfo.write.avro(path)
-
-    val hiveCMD = s"LOAD DATA  INPATH '${path}' OVERWRITE INTO TABLE ct_fota.ysx_md_st_all_pro1st_day_pt PARTITION (pt='${pt}')"    //加载结果到Hive中，便于以后使用
-
-    sqlHiveContext.sql(hiveCMD)
-  }
   def correctFieldNameOfResultDataSet()={
   //由于从数据库拉取的字段名与最终的结果数据集还是有差异的，有必要重命名
 
@@ -232,6 +244,7 @@ class DeviceInfoDataFrame(val deviceInfo:DataFrame) {
   
 }
 object DeviceInfoDataFrame {
+  @transient lazy val logger = Logger[this.type]
   implicit def toFrame(e:DeviceInfoDataFrame) = e.deviceInfo
   implicit def toDeviceInfoDataFrame(e:DataFrame) = new DeviceInfoDataFrame(e)
   implicit val groupByNames:Array[String] = Array("oem",  
@@ -259,7 +272,7 @@ object DeviceInfoDataFrame {
                   "country_type",
                   "data_version")
   private def readDataFile(pt:String,x:String)(implicit sqlHiveContext: HiveContext) = try {
-    Some(sqlHiveContext.read.avro(s"${pt}/${x}"))
+    Some(sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/${x}"))
   } catch {
     case ex: FileNotFoundException =>  None
   }
@@ -284,14 +297,14 @@ object DeviceInfoDataFrame {
   }
   /****加载地区信息***************/
   def loadRegionInfo(regionTableName:String,pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext) = {
-    sqlHiveContext.read.avro(s"${pt}/${regionTableName}").
+    sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/${regionTableName}").
         withColumnRenamed("ctiy_en","city_en").
         drop("COL3").drop("COL4").drop("COL5").drop("COl2").drop("id").drop("push_time").dropDuplicates(Array("imei","ip","mid"))
   }
   /****加载fota4第三方设备***************/
   def loadOpenDeviceInfo(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext) = {
     import sqlHiveContext.implicits._
-    sqlHiveContext.read.avro(s"${pt}/v4deviceopen").
+    sqlHiveContext.read.avro(s"YangShuxuanNotDelete/${pt}/v4deviceopen").
         drop("id").
         drop("COl2").
         drop("COL3").
@@ -344,6 +357,7 @@ object DeviceInfoDataFrame {
                    correctUpperToLower()
   }
   def computeFotaSalesCount(pt:String = "2017-02-07")(implicit sqlHiveContext: HiveContext){
+      import sqlHiveContext.implicits._
           
       ////////////////Fota4/////////////////////////////////////////////////////////////////////////
       val v4dfDeviceInfo = loadDeviceInfo( List("v4device",                                                   //fota4主要设备
@@ -364,7 +378,7 @@ object DeviceInfoDataFrame {
 
 
       //////////////Fota3///////////////////////////////////////////////////////////////////////////
-      val v3dfDeviceInfo = loadDeviceInfo(List("v3device"),pt)
+      val v3dfDeviceInfo = loadDeviceInfo(List("v3device"),pt).correctFota5AddedColumnName()
       val v3dfRegion = loadRegionInfo("v3region",pt)                                         //加载地区信息
       val v3DF = v3dfDeviceInfo.join(v3dfRegion,Seq("imei","mid","ip"))
       
@@ -374,19 +388,23 @@ object DeviceInfoDataFrame {
 
       val afterClean = cleanFotaSalesData(dfDeviceRegion).cache                       //清洗销量数据
 
-
-      afterClean saveCleanedFotaSales pt                                        //存储清理后的销量到hive表里面
+      //val testFields = afterClean.correctForMdstallpro1stimeipt
+      afterClean.saveCommon(pt,"ysx_md_st_all_dt")                                     //存储清理后的销量到hive表里面
+      logger.info(s"数据清理完成-----finish clean:{pt}")
 
       /********去重imei**********************************/
       
       val toDaySalesByImei = (afterClean distinctByImei pt).cache
-      toDaySalesByImei saveDistinctImei pt
+      toDaySalesByImei.select($"oem",$"product",$"region",$"operator",$"imei",$"imei2").saveCommon(pt,"tmp_history_imei")
+      toDaySalesByImei.correctForMdstallpro1stimeipt().saveCommon(pt,"ysx_md_st_all_pro1st_imei_pt")
+      logger.info(s"去重imei完成-----finish imei:{pt}")
 
 
       /********去重mid***********************************/
 
       val toDaySalesByMid = (afterClean distinctByMid pt).cache
-      toDaySalesByMid saveDistinctMid pt
+      toDaySalesByMid.select("oem","product","region","operator","mid").saveCommon(pt,"tmp_history_mid")
+      logger.info(s"去重mid完成-----finish mid:{pt}")
 
       /********旧的计算方式，尤其是表合并非常复杂*************/
 
@@ -397,7 +415,7 @@ object DeviceInfoDataFrame {
       imeit.join(midt,imeit.buildColumeEquelExp(midt),"outer").
       delRedundant().
       correctFieldNameOfResultDataSet().
-      saveToysx_md_st_all_pro1st_day_pt(pt)*/
+      saveCommon(pt,"ysx_md_st_all_pro1st_day_pt")*/
       /********新的计算方式*********************************/
       val imeit = toDaySalesByImei.countImeiOrMidNew("imei2","imei_sum","mid_sum")
       val midt = toDaySalesByMid.countImeiOrMidNew("mid","mid_sum","imei_sum")
@@ -405,7 +423,58 @@ object DeviceInfoDataFrame {
       imeit.unionByName(midt). 
       sumImeiAndMid("imei_sum","mid_sum").
       correctFieldNameOfResultDataSet().
-      saveToysx_md_st_all_pro1st_day_pt(pt)
+      saveCommon(pt,"ysx_md_st_all_pro1st_day_pt")
+      logger.info(s"初步计算完成-----finish compute:${pt}")
+  }
+  def compareWithWXJ(pt:String)(implicit sqlHiveContext: HiveContext){
+      def computeTotalImei(tableName:String)={
+          
+          sqlHiveContext.sql(s"FROM ct_fota.${tableName} SELECT * where pt = '${pt}'").agg(sum("imei_sum")).head.getLong(0)
+      }
+
+      val newTotalImeiCount = computeTotalImei("ysx_md_st_all_pro1st_day_pt")
+
+      val oldTotalImeiCount = computeTotalImei("md_st_all_pro1st_day_pt")
+
+      val diff = newTotalImeiCount - oldTotalImeiCount
+      val diffPerc = 1.0 * diff / oldTotalImeiCount
+      val mailTitle = s"销量差异 ${pt}"
+      val mailContent = s"优化销量：${newTotalImeiCount}，晓晶销量：${oldTotalImeiCount}，差异：${diff}，差异百分比：${diffPerc}"
+      logger.info(mailTitle + "-----" + mailContent)
+      sendMail(mailTitle,mailContent)
+      assert(diff <= 800)
+
+
+  }
+  def run(pt:String)(implicit sqlHiveContext: HiveContext){
+  //读取配置文件确定开始日期，一直运行到指定日期
+    val confFileName = "optCtFotaState.xml"
+
+    val formatStr = "yyyy-MM-dd"
+
+    val format = DateTimeFormat.forPattern(formatStr)
+
+    val finishedDate = DateTime.parse(xml.XML.loadFile(confFileName).text, format)
+
+    val toDate = DateTime.parse(pt,format)
+
+    var beginDate = finishedDate
+
+    while(beginDate.isBefore(toDate)){
+
+      beginDate = beginDate.plusDays(1) //beginDate其实代表了已经完成的最后一天，这里写的有点晦涩
+
+      val curPt = beginDate.toString(formatStr)
+
+      computeFotaSalesCount(curPt)
+
+      compareWithWXJ(curPt)           //由于这里有断言有可能失败导致后续无法进行，因此在这里失败以后需要人工干预以决定是否需要修改日期
+
+      val curNode = <finishedDay>{curPt}</finishedDay> 
+      
+      scala.xml.XML.save(confFileName,curNode) 
+    }
+    
   }
 
 }
