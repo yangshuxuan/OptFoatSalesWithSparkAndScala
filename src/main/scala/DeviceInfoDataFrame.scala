@@ -442,7 +442,7 @@ object DeviceInfoDataFrame {
       val mailContent = s"优化销量：${newTotalImeiCount}，晓晶销量：${oldTotalImeiCount}，差异：${diff}，差异百分比：${diffPerc}"
       logger.info(mailTitle + "-----" + mailContent)
       sendMail(mailTitle,mailContent)
-      assert(diff <= 800)
+      //assert(diff <= 800)
 
 
   }
